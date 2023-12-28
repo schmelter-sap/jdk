@@ -196,11 +196,6 @@ inline bool frame::is_older(intptr_t* id) const   { assert(this->id() != nullptr
 
 inline intptr_t* frame::link() const              { return *(intptr_t **)addr_at(link_offset); }
 
-inline intptr_t* frame::link_or_null() const {
-  intptr_t** ptr = (intptr_t **)addr_at(link_offset);
-  return os::is_readable_pointer(ptr) ? *ptr : nullptr;
-}
-
 inline intptr_t* frame::unextended_sp() const          { assert_absolute(); return _unextended_sp; }
 inline void frame::set_unextended_sp(intptr_t* value)  { _unextended_sp = value; }
 inline int  frame::offset_unextended_sp() const        { assert_offset();   return _offset_unextended_sp; }

@@ -90,11 +90,6 @@ inline intptr_t* frame::link() const {
   return nullptr;
 }
 
-inline intptr_t* frame::link_or_null() const {
-  ShouldNotCallThis();
-  return nullptr;
-}
-
 inline interpreterState frame::get_interpreterState() const {
   return zero_interpreterframe()->interpreter_state();
 }
