@@ -2093,6 +2093,7 @@ PcDesc* PcDescContainer::find_pc_desc_internal(address pc, bool approximate, con
   PcDesc* upper = search.scopes_pcs_end();
   upper -= 1; // exclude final sentinel
   if (lower >= upper)  return nullptr;  // native method; no PcDescs at all
+  if (upper->pc_offset() < pc_offset) return nullptr; // outside of valid range.
 
 #define assert_LU_OK \
   /* invariant on lower..upper during the following search: */ \
