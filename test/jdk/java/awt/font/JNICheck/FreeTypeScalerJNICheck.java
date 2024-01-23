@@ -43,8 +43,11 @@ public class FreeTypeScalerJNICheck {
         if (args.length > 0 && args[0].equals("runtest")) {
             runTest();
         } else {
-            ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder("-Xcheck:jni", FreeTypeScalerJNICheck.class.getName(), "runtest");
+            ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder("-Xcheck:jni", "-XX:+ErrorFileToStderr", "-verbose:jni", FreeTypeScalerJNICheck.class.getName(), "runtest");
             OutputAnalyzer oa = ProcessTools.executeProcess(pb);
+            System.out.println("--- Child output start ---");
+            System.out.println(oa.getOutput());
+            System.out.println("--- Child output end ---");
             oa.shouldContain("Done").shouldNotContain("WARNING").shouldHaveExitValue(0);
         }
     }
