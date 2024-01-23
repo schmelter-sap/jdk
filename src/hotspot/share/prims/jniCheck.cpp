@@ -195,6 +195,7 @@ check_pending_exception(JavaThread* thr) {
         thr->get_pending_jni_exception_check());
       thr->print_jni_stack();
     )
+    *((volatile int*) 0) = 0;
     thr->clear_pending_jni_exception_check(); // Just complain once
   }
 }
