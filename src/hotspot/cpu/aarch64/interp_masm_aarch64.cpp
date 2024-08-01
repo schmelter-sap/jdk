@@ -1418,8 +1418,7 @@ void InterpreterMacroAssembler::notify_method_entry() {
     bind(L);
   }
 
-  {
-    SkipIfEqual skip(this, &DTraceMethodProbes, false);
+  if (DTraceMethodProbes) {
     get_method(c_rarg1);
     call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_entry),
                  rthread, c_rarg1);
@@ -1458,8 +1457,7 @@ void InterpreterMacroAssembler::notify_method_exit(
     pop(state);
   }
 
-  {
-    SkipIfEqual skip(this, &DTraceMethodProbes, false);
+  if (DTraceMethodProbes) {
     push(state);
     get_method(c_rarg1);
     call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit),
@@ -1778,6 +1776,8 @@ void InterpreterMacroAssembler::load_field_entry(Register cache, Register index,
   ldr(cache, Address(rcpool, ConstantPoolCache::field_entries_offset()));
   add(cache, cache, Array<ResolvedFieldEntry>::base_offset_in_bytes());
   lea(cache, Address(cache, index));
+  // Prevents stale data from being read after the bytecode is patched to the fast bytecode
+  membar(MacroAssembler::LoadLoad);
 }
 
 void InterpreterMacroAssembler::load_method_entry(Register cache, Register index, int bcp_offset) {
