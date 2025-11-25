@@ -1351,7 +1351,14 @@ void DumperSupport::dump_object_array(AbstractDumpWriter* writer, objArrayOop ar
 
 // creates HPROF_GC_PRIM_ARRAY_DUMP record for the given type array
 void DumperSupport::dump_prim_array(AbstractDumpWriter* writer, typeArrayOop array) {
-  BasicType type = TypeArrayKlass::cast(array->klass())->element_type();
+  TypeArrayKlass* tak = TypeArrayKlass::cast(array->klass());
+
+  // omit filler arrays
+  if (tak == Universe::fillerArrayKlass()) {
+    return;
+  }
+
+  BasicType type = tak->element_type();
   // 2 * sizeof(u1) + 2 * sizeof(u4) + sizeof(objectID)
   short header_size = 2 * 1 + 2 * 4 + sizeof(address);
 
