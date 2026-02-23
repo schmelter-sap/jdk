@@ -2060,7 +2060,9 @@ class DumperController : public CHeapObj<mtInternal> {
      MonitorLocker ml(_lock, Mutex::_no_safepoint_check_flag);
      _complete_number++;
      // propagate local error to global if any
-     if (local_writer->has_error()) {
+     if (local_writer == nullptr) {
+       global_writer->set_error("Could not allocate segment dumper");
+     } else if (local_writer->has_error()) {
        global_writer->set_error(local_writer->error());
      }
      ml.notify();
@@ -2209,7 +2211,7 @@ void DumpMerger::do_merge() {
 
   // Merge the content of the remaining files into base file. Regardless of whether
   // the merge process is successful or not, these segmented files will be deleted.
-  for (int i = 0; i < _dump_seq; i++) {
+  for (int i = 1; i < _dump_seq; i++) {
     ResourceMark rm;
     const char* path = get_writer_path(_path, i);
     if (!_has_error) {
@@ -2475,21 +2477,29 @@ void VM_HeapDumper::work(uint worker_id) {
 
   ResourceMark rm;
   // share global compressor, local DumpWriter is not responsible for its life cycle
-  DumpWriter segment_writer(DumpMerger::get_writer_path(writer()->get_file_path(), dumper_id),
-                            writer()->is_overwrite(), writer()->compressor());
-  if (!segment_writer.has_error()) {
+  DumpWriter* curr_writer;
+
+  if (is_vm_dumper(dumper_id)) {
+    // Don't add an extra segement for the vm dumper, it is not needed.
+    curr_writer = writer();
+  } else {
+    curr_writer = new (std::nothrow) DumpWriter(DumpMerger::get_writer_path(writer()->get_file_path(),
+      dumper_id), writer()->is_overwrite(), writer()->compressor());
+  }
+
+  if ((curr_writer != nullptr) && !curr_writer->has_error()) {
     if (is_vm_dumper(dumper_id)) {
       // dump some non-heap subrecords to heap dump segment
       TraceTime timer("Dump non-objects (part 2)", TRACETIME_LOG(Info, heapdump));
       // Writes HPROF_GC_CLASS_DUMP records
-      ClassDumper class_dumper(&segment_writer);
+      ClassDumper class_dumper(curr_writer);
       ClassLoaderDataGraph::classes_do(&class_dumper);
 
       // HPROF_GC_ROOT_THREAD_OBJ + frames + jni locals
-      dump_threads(&segment_writer);
+      dump_threads(writer());
 
       // HPROF_GC_ROOT_JNI_GLOBAL
-      JNIGlobalsDumper jni_dumper(&segment_writer);
+      JNIGlobalsDumper jni_dumper(curr_writer);
       JNIHandles::oops_do(&jni_dumper);
       // technically not jni roots, but global roots
       // for things like preallocated throwable backtraces
@@ -2497,7 +2507,7 @@ void VM_HeapDumper::work(uint worker_id) {
       // HPROF_GC_ROOT_STICKY_CLASS
       // These should be classes in the null class loader data, and not all classes
       // if !ClassUnloading
-      StickyClassDumper stiky_class_dumper(&segment_writer);
+      StickyClassDumper stiky_class_dumper(curr_writer);
       ClassLoaderData::the_null_class_loader_data()->classes_do(&stiky_class_dumper);
     }
 
@@ -2510,7 +2520,7 @@ void VM_HeapDumper::work(uint worker_id) {
     // of the heap dump.
 
     TraceTime timer(is_parallel_dump() ? "Dump heap objects in parallel" : "Dump heap objects", TRACETIME_LOG(Info, heapdump));
-    HeapObjectDumper obj_dumper(&segment_writer, this);
+    HeapObjectDumper obj_dumper(curr_writer, this);
     if (!is_parallel_dump()) {
       Universe::heap()->object_iterate(&obj_dumper);
     } else {
@@ -2518,20 +2528,20 @@ void VM_HeapDumper::work(uint worker_id) {
       _poi->object_iterate(&obj_dumper, worker_id);
     }
 
-    segment_writer.finish_dump_segment();
-    segment_writer.flush();
+    curr_writer->finish_dump_segment();
+    curr_writer->flush();
   }
 
-  _dumper_controller->dumper_complete(&segment_writer, writer());
+  _dumper_controller->dumper_complete(curr_writer, writer());
 
   if (is_vm_dumper(dumper_id)) {
     _dumper_controller->wait_all_dumpers_complete();
 
-    // flush global writer
-    writer()->flush();
-
     // At this point, all fragments of the heapdump have been written to separate files.
     // We need to merge them into a complete heapdump and write HPROF_HEAP_DUMP_END at that time.
+  }
+  else {
+    delete curr_writer;
   }
 }
 
