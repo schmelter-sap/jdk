@@ -2594,15 +2594,14 @@ void VM_HeapDumper::dump_vthread(oop vt, AbstractDumpWriter* segment_writer) {
   ThreadDumper thread_dumper(ThreadDumper::ThreadType::UnmountedVirtual, nullptr, vt);
   thread_dumper.init_serial_nums(&_thread_serial_num, &_frame_serial_num);
 
-  // write HPROF_TRACE/HPROF_FRAME records to global writer
-  _dumper_controller->lock_global_writer();
-  thread_dumper.dump_stack_traces(writer(), _klass_map);
-  _dumper_controller->unlock_global_writer();
-
   // write HPROF_GC_ROOT_THREAD_OBJ/HPROF_GC_ROOT_JAVA_FRAME/HPROF_GC_ROOT_JNI_LOCAL subrecord
   // to segment writer
   thread_dumper.dump_thread_obj(segment_writer);
   thread_dumper.dump_stack_refs(segment_writer);
+
+  // We have to end the dump segment to write the stack traces.
+  segment_writer->finish_dump_segment();
+  thread_dumper.dump_stack_traces(segment_writer, _klass_map);
 }
 
 // dump the heap to given path.
