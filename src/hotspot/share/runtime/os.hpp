@@ -721,8 +721,9 @@ class os: AllStatic {
   static int open(const char *path, int oflag, int mode);
   static FILE* fdopen(int fd, const char* mode);
   static FILE* fopen(const char* path, const char* mode);
-  static jlong ftell(FILE* file);
-  static int fseek(FILE* file, jlong offset, int whence);
+  typedef int64_t off_t;
+  static os::off_t ftell(FILE* file);
+  static int fseek(FILE* file, os::off_t offset, int whence);
   static jlong lseek(int fd, jlong offset, int whence);
   static bool file_exists(const char* file);
 

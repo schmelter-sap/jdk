@@ -5114,12 +5114,12 @@ jlong os::seek_to_file_offset(int fd, jlong offset) {
   return (jlong)::_lseeki64(fd, (__int64)offset, SEEK_SET);
 }
 
-jlong os::ftell(FILE* file) {
-  return (jlong) ::_ftelli64(file);
+os::off_t os::ftell(FILE* file) {
+  return ::_ftelli64(file);
 }
 
-int os::fseek(FILE* file, jlong offset, int whence) {
-  return (jlong) ::_fseeki64(file, offset, whence);
+int os::fseek(FILE* file, os::off_t offset, int whence) {
+  return ::_fseeki64(file,offset, whence);
 }
 
 jlong os::lseek(int fd, jlong offset, int whence) {
