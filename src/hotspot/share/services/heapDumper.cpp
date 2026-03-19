@@ -2140,7 +2140,7 @@ void DumpMerger::merge_file(int dump_index) {
   TraceTime timer("Merge segmented heap file directly", TRACETIME_LOG(Info, heapdump));
 
   // Seek to start of the file.
-  int segment_fd = _segment_writer[dump_index]->get_fd();
+  int segment_fd = _segment_writers[dump_index]->get_fd();
 
   if (os::lseek(segment_fd, 0, SEEK_SET) != 0) {
     set_error("Could not seek to start of segment file");
@@ -2149,10 +2149,10 @@ void DumpMerger::merge_file(int dump_index) {
 
   // A successful call to sendfile may write fewer bytes than requested; the
   // caller should be prepared to retry the call if there were unsent bytes.
-  julong offset = 0;
-  julong file_size = segment_writer->bytes_written();
+  jlong offset = 0;
+  jlong file_size = (jlong) _segment_writers[dump_index]->bytes_written();
   while (offset < file_size) {
-    int ret = os::Linux::sendfile(_writer->get_fd(), segment_fd, &offset, st.st_size);
+    int ret = os::Linux::sendfile(_writer->get_fd(), segment_fd, &offset, file_size);
     if (ret == -1) {
       set_error("Failed to merge segmented heap file");
       break;
@@ -2162,7 +2162,7 @@ void DumpMerger::merge_file(int dump_index) {
   // As sendfile variant does not call the write method of the global writer,
   // bytes_written is also incorrect for this variant, we need to explicitly
   // accumulate bytes_written for the global writer in this case
-  julong accum = _writer->bytes_written() + st.st_size;
+  julong accum = _writer->bytes_written() + file_size;
   _writer->set_bytes_written(accum);
 }
 #else
@@ -2193,8 +2193,6 @@ void DumpMerger::merge_file(int dump_index) {
   } if (_segment_writers[dump_index]->bytes_written() != total) {
     set_error("Merged heap dump is incomplete");
   }
-
-  os::ftruncate(segment_fd, 0);
 }
 #endif
 
@@ -2210,11 +2208,10 @@ void DumpMerger::do_merge() {
   // the merge process is successful or not, these segmented files will be deleted.
   for (int i = 0; i < _dump_seq; i++) {
     ResourceMark rm;
-    char const* path = os::strdup_check_oom(_segment_writers[i]->get_file_path());
     if (!_has_error) {
       merge_file(i);
     }
-    os::ftruncate(_segment_writers[i]->get_fd(), 0);
+    char const* path = os::strdup_check_oom(_segment_writers[i]->get_file_path());
     delete _segment_writers[i];
     _segment_writers[i] = nullptr;
     // Delete selected segmented heap file nevertheless
