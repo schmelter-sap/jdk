@@ -927,6 +927,10 @@ ssize_t os::pd_write(int fd, const void *buf, size_t nBytes) {
 #endif
 }
 
+ssize_t os::read(int fd, void* buf, size_t nBytes) {
+  return ::read(fd, buf, nBytes);
+}
+
 ssize_t os::read_at(int fd, void *buf, unsigned int nBytes, jlong offset) {
   return ::pread(fd, buf, nBytes, offset);
 }

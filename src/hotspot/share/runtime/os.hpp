@@ -750,7 +750,8 @@ class os: AllStatic {
 
   //File i/o operations
 
-  static ssize_t read_at(int fd, void *buf, unsigned int nBytes, jlong offset);
+  static ssize_t read(int fd, void* buf, size_t nBytes);
+  static ssize_t read_at(int fd, void* buf, unsigned int nBytes, jlong offset);
   // Writes the bytes completely. Returns true on success, false otherwise.
   static bool write(int fd, const void *buf, size_t nBytes);
 

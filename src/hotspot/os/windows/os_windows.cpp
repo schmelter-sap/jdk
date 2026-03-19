@@ -5041,7 +5041,7 @@ FILE* os::fdopen(int fd, const char* mode) {
   return ::_fdopen(fd, mode);
 }
 
-ssize_t os::pd_write(int fd, const void *buf, size_t nBytes) {
+ssize_t os::pd_write(int fd, const void* buf, size_t nBytes) {
   ssize_t original_len = (ssize_t)nBytes;
   while (nBytes > 0) {
     unsigned int len = nBytes > INT_MAX ? INT_MAX : (unsigned int)nBytes;
@@ -5051,7 +5051,7 @@ ssize_t os::pd_write(int fd, const void *buf, size_t nBytes) {
       return OS_ERR;
     }
     nBytes -= written_bytes;
-    buf = (char *)buf + written_bytes;
+    buf = (char*)buf + written_bytes;
   }
   return original_len;
 }
@@ -5117,6 +5117,31 @@ jlong os::seek_to_file_offset(int fd, jlong offset) {
 
 jlong os::lseek(int fd, jlong offset, int whence) {
   return (jlong) ::_lseeki64(fd, offset, whence);
+}
+
+
+ssize_t os::read(int fd, void* buf, size_t nBytes) {
+  DWORD nread;
+  HANDLE h = (HANDLE)::_get_osfhandle(fd);
+  ssize_t result = 0;
+
+  while (nBytes > 0) {
+    DWORD len = nBytes > INT_MAX ? INT_MAX : (DWORD) nBytes;
+
+    if (ReadFile(h, buf, len, &nread, nullptr)) {
+      result += nread;
+      nBytes -= nread;
+      buf = (char*) buf + nread;
+
+      if (nread < len) {
+        break;
+      }
+    } else {
+      return OS_ERR;
+    }
+  }
+
+  return result;
 }
 
 ssize_t os::read_at(int fd, void *buf, unsigned int nBytes, jlong offset) {

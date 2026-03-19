@@ -2078,19 +2078,19 @@ class DumperController : public CHeapObj<mtInternal> {
 class DumpMerger : public StackObj {
 private:
   DumpWriter* _writer;
-  const char* _path;
+  DumpWriter** _segment_writers;
   bool _has_error;
   int _dump_seq;
 
 private:
-  void merge_file(const char* path);
+  void merge_file(int dump_index);
   void merge_done();
   void set_error(const char* msg);
 
 public:
-  DumpMerger(const char* path, DumpWriter* writer, int dump_seq) :
+  DumpMerger(DumpWriter* writer, DumpWriter** segment_writers, int dump_seq) :
     _writer(writer),
-    _path(path),
+    _segment_writers(segment_writers),
     _has_error(_writer->has_error()),
     _dump_seq(dump_seq) {}
 
@@ -2127,8 +2127,7 @@ void DumpMerger::merge_done() {
 }
 
 void DumpMerger::set_error(const char* msg) {
-  assert(msg != nullptr, "sanity check");
-  log_error(heapdump)("%s (file: %s)", msg, _path);
+  assert(msg != nullptr, "sanity check");  log_error(heapdump)("%s (file: %s)", msg, _writer->get_file_path());
   _writer->set_error(msg);
   _has_error = true;
 }
@@ -2137,31 +2136,26 @@ void DumpMerger::set_error(const char* msg) {
 // Merge segmented heap files via sendfile, it's more efficient than the
 // read+write combination, which would require transferring data to and from
 // user space.
-void DumpMerger::merge_file(const char* path) {
+void DumpMerger::merge_file(int dump_index) {
   TraceTime timer("Merge segmented heap file directly", TRACETIME_LOG(Info, heapdump));
 
-  int segment_fd = os::open(path, O_RDONLY, 0);
-  if (segment_fd == -1) {
-    set_error("Can not open segmented heap file during merging");
-    return;
-  }
+  // Seek to start of the file.
+  int segment_fd = _segment_writer[dump_index]->get_fd();
 
-  struct stat st;
-  if (os::stat(path, &st) != 0) {
-    ::close(segment_fd);
-    set_error("Can not get segmented heap file size during merging");
+  if (os::lseek(segment_fd, 0, SEEK_SET) != 0) {
+    set_error("Could not seek to start of segment file");
     return;
   }
 
   // A successful call to sendfile may write fewer bytes than requested; the
   // caller should be prepared to retry the call if there were unsent bytes.
-  jlong offset = 0;
-  while (offset < st.st_size) {
+  julong offset = 0;
+  julong file_size = segment_writer->bytes_written();
+  while (offset < file_size) {
     int ret = os::Linux::sendfile(_writer->get_fd(), segment_fd, &offset, st.st_size);
     if (ret == -1) {
-      ::close(segment_fd);
       set_error("Failed to merge segmented heap file");
-      return;
+      break;
     }
   }
 
@@ -2170,32 +2164,37 @@ void DumpMerger::merge_file(const char* path) {
   // accumulate bytes_written for the global writer in this case
   julong accum = _writer->bytes_written() + st.st_size;
   _writer->set_bytes_written(accum);
-  ::close(segment_fd);
 }
 #else
 // Generic implementation using read+write
-void DumpMerger::merge_file(const char* path) {
+void DumpMerger::merge_file(int dump_index) {
   TraceTime timer("Merge segmented heap file", TRACETIME_LOG(Info, heapdump));
 
-  fileStream segment_fs(path, "rb");
-  if (!segment_fs.is_open()) {
-    set_error("Can not open segmented heap file during merging");
+  int segment_fd = _segment_writers[dump_index]->get_fd();
+
+  if (os::lseek(segment_fd, 0, SEEK_SET) != 0) {
+    set_error("Could not seek to start of segment file");
     return;
   }
 
   jlong total = 0;
-  size_t cnt = 0;
+  ssize_t cnt = 0;
 
   // Use _writer buffer for reading.
-  while ((cnt = segment_fs.read(_writer->buffer(), 1, _writer->buffer_size())) != 0) {
-    _writer->set_position(cnt);
+  while ((cnt = os::read(segment_fd, _writer->buffer(), (unsigned int)_writer->buffer_size())) > 0) {
+    _writer->set_position((size_t) cnt);
     _writer->flush();
     total += cnt;
   }
 
-  if (segment_fs.fileSize() != total) {
+  if (cnt == OS_ERR) {
+    log_error(heapdump)("Read failed for %s: %s", _segment_writers[dump_index]->get_file_path(), os::strerror(errno));
+    set_error("Error reading segment file");
+  } if (_segment_writers[dump_index]->bytes_written() != total) {
     set_error("Merged heap dump is incomplete");
   }
+
+  os::ftruncate(segment_fd, 0);
 }
 #endif
 
@@ -2211,14 +2210,18 @@ void DumpMerger::do_merge() {
   // the merge process is successful or not, these segmented files will be deleted.
   for (int i = 0; i < _dump_seq; i++) {
     ResourceMark rm;
-    const char* path = get_writer_path(_path, i);
+    char const* path = os::strdup_check_oom(_segment_writers[i]->get_file_path());
     if (!_has_error) {
-      merge_file(path);
+      merge_file(i);
     }
+    os::ftruncate(_segment_writers[i]->get_fd(), 0);
+    delete _segment_writers[i];
+    _segment_writers[i] = nullptr;
     // Delete selected segmented heap file nevertheless
     if (remove(path) != 0) {
       log_info(heapdump)("Removal of segment file (%d) failed (%d)", i, errno);
     }
+    os::free((void*) path);
   }
 
   // restore compressor for further use
@@ -2230,6 +2233,7 @@ void DumpMerger::do_merge() {
 class VM_HeapDumper : public VM_GC_Operation, public WorkerTask, public UnmountedVThreadDumper {
  private:
   DumpWriter*             _writer;
+  DumpWriter**             _segment_writers;
   JavaThread*             _oome_thread;
   Method*                 _oome_constructor;
   bool                    _gc_before_heap_dump;
@@ -2270,13 +2274,14 @@ class VM_HeapDumper : public VM_GC_Operation, public WorkerTask, public Unmounte
   void dump_stack_traces(AbstractDumpWriter* writer);
 
  public:
-  VM_HeapDumper(DumpWriter* writer, bool gc_before_heap_dump, bool oome, uint num_dump_threads) :
+  VM_HeapDumper(DumpWriter* writer, DumpWriter**  segment_writers, bool gc_before_heap_dump, bool oome, uint num_dump_threads) :
     VM_GC_Operation(0 /* total collections,      dummy, ignored */,
                     GCCause::_heap_dump /* GC Cause */,
                     0 /* total full collections, dummy, ignored */,
                     gc_before_heap_dump),
     WorkerTask("dump heap") {
     _writer = writer;
+    _segment_writers = segment_writers;
     _gc_before_heap_dump = gc_before_heap_dump;
     _klass_map = new (mtServiceability) GrowableArray<Klass*>(INITIAL_CLASS_COUNT, mtServiceability);
 
@@ -2475,21 +2480,21 @@ void VM_HeapDumper::work(uint worker_id) {
 
   ResourceMark rm;
   // share global compressor, local DumpWriter is not responsible for its life cycle
-  DumpWriter segment_writer(DumpMerger::get_writer_path(writer()->get_file_path(), dumper_id),
-                            writer()->is_overwrite(), writer()->compressor());
-  if (!segment_writer.has_error()) {
+  DumpWriter* segment_writer = _segment_writers[dumper_id];
+
+  if (!segment_writer->has_error()) {
     if (is_vm_dumper(dumper_id)) {
       // dump some non-heap subrecords to heap dump segment
       TraceTime timer("Dump non-objects (part 2)", TRACETIME_LOG(Info, heapdump));
       // Writes HPROF_GC_CLASS_DUMP records
-      ClassDumper class_dumper(&segment_writer);
+      ClassDumper class_dumper(segment_writer);
       ClassLoaderDataGraph::classes_do(&class_dumper);
 
       // HPROF_GC_ROOT_THREAD_OBJ + frames + jni locals
-      dump_threads(&segment_writer);
+      dump_threads(segment_writer);
 
       // HPROF_GC_ROOT_JNI_GLOBAL
-      JNIGlobalsDumper jni_dumper(&segment_writer);
+      JNIGlobalsDumper jni_dumper(segment_writer);
       JNIHandles::oops_do(&jni_dumper);
       // technically not jni roots, but global roots
       // for things like preallocated throwable backtraces
@@ -2497,7 +2502,7 @@ void VM_HeapDumper::work(uint worker_id) {
       // HPROF_GC_ROOT_STICKY_CLASS
       // These should be classes in the null class loader data, and not all classes
       // if !ClassUnloading
-      StickyClassDumper stiky_class_dumper(&segment_writer);
+      StickyClassDumper stiky_class_dumper(segment_writer);
       ClassLoaderData::the_null_class_loader_data()->classes_do(&stiky_class_dumper);
     }
 
@@ -2510,7 +2515,7 @@ void VM_HeapDumper::work(uint worker_id) {
     // of the heap dump.
 
     TraceTime timer(is_parallel_dump() ? "Dump heap objects in parallel" : "Dump heap objects", TRACETIME_LOG(Info, heapdump));
-    HeapObjectDumper obj_dumper(&segment_writer, this);
+    HeapObjectDumper obj_dumper(segment_writer, this);
     if (!is_parallel_dump()) {
       Universe::heap()->object_iterate(&obj_dumper);
     } else {
@@ -2518,11 +2523,11 @@ void VM_HeapDumper::work(uint worker_id) {
       _poi->object_iterate(&obj_dumper, worker_id);
     }
 
-    segment_writer.finish_dump_segment();
-    segment_writer.flush();
+    segment_writer->finish_dump_segment();
+    segment_writer->flush();
   }
 
-  _dumper_controller->dumper_complete(&segment_writer, writer());
+  _dumper_controller->dumper_complete(segment_writer, writer());
 
   if (is_vm_dumper(dumper_id)) {
     _dumper_controller->wait_all_dumpers_complete();
@@ -2629,7 +2634,6 @@ int HeapDumper::dump(const char* path, outputStream* out, int compression, bool 
 
     if (compressor == nullptr) {
       set_error("Could not allocate gzip compressor");
-      return -1;
     }
   }
 
@@ -2637,19 +2641,31 @@ int HeapDumper::dump(const char* path, outputStream* out, int compression, bool 
 
   if (writer.error() != nullptr) {
     set_error(writer.error());
-    if (out != nullptr) {
-      out->print_cr("Unable to create %s: %s", path,
-        (error() != nullptr) ? error() : "reason unknown");
+  }
+
+  DumpWriter** segment_writers = NEW_C_HEAP_ARRAY(DumpWriter*, num_dump_threads, mtInternal);
+
+  for (uint i = 0; i < num_dump_threads; ++i) {
+    segment_writers[i] = new (std::nothrow) DumpWriter(DumpMerger::get_writer_path(path, i), overwrite, compressor);
+
+    if (segment_writers[i] == nullptr) {
+      set_error("Could not allocate segment writer");
+    } else if (segment_writers[i]->error() != nullptr) {
+      set_error(segment_writers[i]->error());
     }
-    return -1;
   }
 
   // generate the segmented heap dump into separate files
-  VM_HeapDumper dumper(&writer, _gc_before_heap_dump, _oome, num_dump_threads);
-  VMThread::execute(&dumper);
+  VM_HeapDumper dumper(&writer, segment_writers, _gc_before_heap_dump, _oome, num_dump_threads);
 
-  // record any error that the writer may have encountered
-  set_error(writer.error());
+  if (error() == nullptr) {
+    VMThread::execute(&dumper);
+
+    // record any error that the writer may have encountered
+    if (writer.error() != nullptr) {
+      set_error(writer.error());
+    }
+  }
 
   // Heap dump process is done in two phases
   //
@@ -2658,14 +2674,15 @@ int HeapDumper::dump(const char* path, outputStream* out, int compression, bool 
   //
   // Phase 2: Merge multiple heap files into one complete heap dump file.
   //          This is done by DumpMerger, which is performed outside safepoint
-
-  DumpMerger merger(path, &writer, dumper.dump_seq());
-  // Perform heapdump file merge operation in the current thread prevents us
-  // from occupying the VM Thread, which in turn affects the occurrence of
-  // GC and other VM operations.
-  merger.do_merge();
-  if (writer.error() != nullptr) {
-    set_error(writer.error());
+  if (error() == nullptr) {
+    DumpMerger merger(&writer, segment_writers, dumper.dump_seq());
+    // Perform heapdump file merge operation in the current thread prevents us
+    // from occupying the VM Thread, which in turn affects the occurrence of
+    // GC and other VM operations.
+    merger.do_merge();
+    if (writer.error() != nullptr) {
+      set_error(writer.error());
+    }
   }
 
   // emit JFR event
@@ -2686,11 +2703,18 @@ int HeapDumper::dump(const char* path, outputStream* out, int compression, bool 
     timer()->stop();
     if (error() == nullptr) {
       out->print_cr("Heap dump file created [" JULONG_FORMAT " bytes in %3.3f secs]",
-                    writer.bytes_written(), timer()->seconds());
-    } else {
+        writer.bytes_written(), timer()->seconds());
+    }
+    else {
       out->print_cr("Dump file is incomplete: %s", writer.error());
     }
   }
+
+  for (uint i = 0; i < num_dump_threads; ++i) {
+    delete segment_writers[i];
+  }
+
+  FREE_C_HEAP_ARRAY(DumpWriter*, segment_writers);
 
   if (compressor != nullptr) {
     delete compressor;
