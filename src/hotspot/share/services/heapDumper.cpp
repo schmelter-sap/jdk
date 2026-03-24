@@ -2139,16 +2139,10 @@ void DumpMerger::set_error(const char* msg) {
 void DumpMerger::merge_file(int dump_index) {
   TraceTime timer("Merge segmented heap file directly", TRACETIME_LOG(Info, heapdump));
 
-  // Seek to start of the file.
-  int segment_fd = _segment_writers[dump_index]->get_fd();
-
-  if (os::lseek(segment_fd, 0, SEEK_SET) != 0) {
-    set_error("Could not seek to start of segment file");
-    return;
-  }
 
   // A successful call to sendfile may write fewer bytes than requested; the
   // caller should be prepared to retry the call if there were unsent bytes.
+  int segment_fd = _segment_writers[dump_index]->get_fd();
   jlong offset = 0;
   jlong file_size = (jlong) _segment_writers[dump_index]->bytes_written();
   while (offset < file_size) {
@@ -2171,12 +2165,6 @@ void DumpMerger::merge_file(int dump_index) {
   TraceTime timer("Merge segmented heap file", TRACETIME_LOG(Info, heapdump));
 
   int segment_fd = _segment_writers[dump_index]->get_fd();
-
-  if (os::lseek(segment_fd, 0, SEEK_SET) != 0) {
-    set_error("Could not seek to start of segment file");
-    return;
-  }
-
   jlong total = 0;
   ssize_t cnt = 0;
 
@@ -2207,18 +2195,25 @@ void DumpMerger::do_merge() {
   // Merge the content of the remaining files into base file. Regardless of whether
   // the merge process is successful or not, these segmented files will be deleted.
   for (int i = 0; i < _dump_seq; i++) {
-    ResourceMark rm;
+    int segment_fd = _segment_writers[i]->get_fd();
+
+    if (os::lseek(segment_fd, 0, SEEK_SET) != 0) {
+      set_error("Could not seek to start of segment file");
+    }
+
     if (!_has_error) {
+      ResourceMark rm;
       merge_file(i);
     }
-    char const* path = os::strdup_check_oom(_segment_writers[i]->get_file_path());
-    delete _segment_writers[i];
-    _segment_writers[i] = nullptr;
-    // Delete selected segmented heap file nevertheless
-    if (remove(path) != 0) {
-      log_info(heapdump)("Removal of segment file (%d) failed (%d)", i, errno);
+
+    if (os::lseek(segment_fd, 0, SEEK_SET) != 0) {
+      set_error("Could not seek to start of segment file");
     }
-    os::free((void*) path);
+
+    if (os::ftruncate(segment_fd, 0) != 0) {
+      log_error(heapdump)("Could not truncate %s: %s", 
+                          _segment_writers[i]->get_file_path(), os::strerror(errno));
+    }
   }
 
   // restore compressor for further use
@@ -2642,13 +2637,16 @@ int HeapDumper::dump(const char* path, outputStream* out, int compression, bool 
 
   DumpWriter** segment_writers = NEW_C_HEAP_ARRAY(DumpWriter*, num_dump_threads, mtInternal);
 
-  for (uint i = 0; i < num_dump_threads; ++i) {
-    segment_writers[i] = new (std::nothrow) DumpWriter(DumpMerger::get_writer_path(path, i), overwrite, compressor);
+  {
+    TraceTime timer("Creating segmented heap file", TRACETIME_LOG(Info, heapdump));
+    for (uint i = 0; i < num_dump_threads; ++i) {
+      segment_writers[i] = new (std::nothrow) DumpWriter(DumpMerger::get_writer_path(path, i), overwrite, compressor);
 
-    if (segment_writers[i] == nullptr) {
-      set_error("Could not allocate segment writer");
-    } else if (segment_writers[i]->error() != nullptr) {
-      set_error(segment_writers[i]->error());
+      if (segment_writers[i] == nullptr) {
+        set_error("Could not allocate segment writer");
+      } else if (segment_writers[i]->error() != nullptr) {
+        set_error(segment_writers[i]->error());
+      }
     }
   }
 
@@ -2707,8 +2705,18 @@ int HeapDumper::dump(const char* path, outputStream* out, int compression, bool 
     }
   }
 
-  for (uint i = 0; i < num_dump_threads; ++i) {
-    delete segment_writers[i];
+  {
+    TraceTime timer("Removing segmented heap file", TRACETIME_LOG(Info, heapdump));
+
+    for (int i = 0; i < dumper.dump_seq(); ++i) {
+      char const* path = os::strdup_check_oom(segment_writers[i]->get_file_path());
+      delete segment_writers[i];
+      segment_writers[i] = nullptr;
+      if (remove(path) != 0) {
+        log_info(heapdump)("Removal of segment file (%d) failed (%d)", i, errno);
+      }
+      os::free((void*) path);
+    }
   }
 
   FREE_C_HEAP_ARRAY(DumpWriter*, segment_writers);
