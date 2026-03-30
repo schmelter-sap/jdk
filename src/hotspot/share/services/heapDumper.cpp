@@ -2230,6 +2230,7 @@ void DumpMerger::do_merge() {
 class VM_HeapDumper : public VM_GC_Operation, public WorkerTask, public UnmountedVThreadDumper {
  private:
   DumpWriter*             _writer;
+  DumpWriter**            _segment_writers;
   JavaThread*             _oome_thread;
   Method*                 _oome_constructor;
   bool                    _gc_before_heap_dump;
@@ -2270,13 +2271,14 @@ class VM_HeapDumper : public VM_GC_Operation, public WorkerTask, public Unmounte
   void dump_stack_traces(AbstractDumpWriter* writer);
 
  public:
-  VM_HeapDumper(DumpWriter* writer, bool gc_before_heap_dump, bool oome, uint num_dump_threads) :
+  VM_HeapDumper(DumpWriter* writer, DumpWriter** segment_writers, bool gc_before_heap_dump, bool oome, uint num_dump_threads) :
     VM_GC_Operation(0 /* total collections,      dummy, ignored */,
                     GCCause::_heap_dump /* GC Cause */,
                     0 /* total full collections, dummy, ignored */,
                     gc_before_heap_dump),
     WorkerTask("dump heap") {
     _writer = writer;
+    _segment_writers = segment_writers;
     _gc_before_heap_dump = gc_before_heap_dump;
     _klass_map = new (mtServiceability) GrowableArray<Klass*>(INITIAL_CLASS_COUNT, mtServiceability);
 
@@ -2435,6 +2437,11 @@ void VM_HeapDumper::work(uint worker_id) {
   // VM Dumper works on all non-heap data dumping and part of heap iteration.
   int dumper_id = get_next_dumper_id();
 
+  // share global compressor, local DumpWriter is not responsible for its life cycle
+  DumpWriter* segment_writer = new DumpWriter(DumpMerger::get_writer_path(
+    writer()->get_file_path(), dumper_id), writer()->is_overwrite(), writer()->compressor());
+  _segment_writers[dumper_id] = segment_writer;
+
   if (is_vm_dumper(dumper_id)) {
     // lock global writer, it will be unlocked after VM Dumper finishes with non-heap data
     _dumper_controller->lock_global_writer();
@@ -2474,22 +2481,19 @@ void VM_HeapDumper::work(uint worker_id) {
   // HPROF_HEAP_DUMP/HPROF_HEAP_DUMP_SEGMENT starts here
 
   ResourceMark rm;
-  // share global compressor, local DumpWriter is not responsible for its life cycle
-  DumpWriter segment_writer(DumpMerger::get_writer_path(writer()->get_file_path(), dumper_id),
-                            writer()->is_overwrite(), writer()->compressor());
-  if (!segment_writer.has_error()) {
+  if (!segment_writer->has_error()) {
     if (is_vm_dumper(dumper_id)) {
       // dump some non-heap subrecords to heap dump segment
       TraceTime timer("Dump non-objects (part 2)", TRACETIME_LOG(Info, heapdump));
       // Writes HPROF_GC_CLASS_DUMP records
-      ClassDumper class_dumper(&segment_writer);
+      ClassDumper class_dumper(segment_writer);
       ClassLoaderDataGraph::classes_do(&class_dumper);
 
       // HPROF_GC_ROOT_THREAD_OBJ + frames + jni locals
-      dump_threads(&segment_writer);
+      dump_threads(segment_writer);
 
       // HPROF_GC_ROOT_JNI_GLOBAL
-      JNIGlobalsDumper jni_dumper(&segment_writer);
+      JNIGlobalsDumper jni_dumper(segment_writer);
       JNIHandles::oops_do(&jni_dumper);
       // technically not jni roots, but global roots
       // for things like preallocated throwable backtraces
@@ -2497,7 +2501,7 @@ void VM_HeapDumper::work(uint worker_id) {
       // HPROF_GC_ROOT_STICKY_CLASS
       // These should be classes in the null class loader data, and not all classes
       // if !ClassUnloading
-      StickyClassDumper stiky_class_dumper(&segment_writer);
+      StickyClassDumper stiky_class_dumper(segment_writer);
       ClassLoaderData::the_null_class_loader_data()->classes_do(&stiky_class_dumper);
     }
 
@@ -2510,7 +2514,7 @@ void VM_HeapDumper::work(uint worker_id) {
     // of the heap dump.
 
     TraceTime timer(is_parallel_dump() ? "Dump heap objects in parallel" : "Dump heap objects", TRACETIME_LOG(Info, heapdump));
-    HeapObjectDumper obj_dumper(&segment_writer, this);
+    HeapObjectDumper obj_dumper(segment_writer, this);
     if (!is_parallel_dump()) {
       Universe::heap()->object_iterate(&obj_dumper);
     } else {
@@ -2518,11 +2522,11 @@ void VM_HeapDumper::work(uint worker_id) {
       _poi->object_iterate(&obj_dumper, worker_id);
     }
 
-    segment_writer.finish_dump_segment();
-    segment_writer.flush();
+    segment_writer->finish_dump_segment();
+    segment_writer->flush();
   }
 
-  _dumper_controller->dumper_complete(&segment_writer, writer());
+  _dumper_controller->dumper_complete(segment_writer, writer());
 
   if (is_vm_dumper(dumper_id)) {
     _dumper_controller->wait_all_dumpers_complete();
@@ -2644,12 +2648,22 @@ int HeapDumper::dump(const char* path, outputStream* out, int compression, bool 
     return -1;
   }
 
+  DumpWriter** segment_writers = NEW_C_HEAP_ARRAY(DumpWriter*, num_dump_threads, mtInternal);
+  memset(segment_writers, 0, sizeof(DumpWriter*) * num_dump_threads);
+
   // generate the segmented heap dump into separate files
-  VM_HeapDumper dumper(&writer, _gc_before_heap_dump, _oome, num_dump_threads);
+  VM_HeapDumper dumper(&writer, segment_writers, _gc_before_heap_dump, _oome, num_dump_threads);
   VMThread::execute(&dumper);
 
   // record any error that the writer may have encountered
   set_error(writer.error());
+
+  // Close all segment writers outside of the VM operation.
+  for (int i = 0; i < dumper.dump_seq(); ++i) {
+    delete segment_writers[i];
+  }
+
+  FREE_C_HEAP_ARRAY(DumpWriter*, segment_writers);
 
   // Heap dump process is done in two phases
   //
