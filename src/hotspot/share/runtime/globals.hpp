@@ -1015,7 +1015,7 @@ const int ObjectAlignmentInBytes = 8;
   product(bool, DisplayVMOutputToStdout, false,                             \
           "If DisplayVMOutput is true, display all VM output to stdout")    \
                                                                             \
-  product(bool, ErrorFileToStderr, false,                                   \
+  product(bool, ErrorFileToStderr, true,                                    \
           "If true, error data is printed to stderr instead of a file")     \
                                                                             \
   product(bool, ErrorFileToStdout, false,                                   \
