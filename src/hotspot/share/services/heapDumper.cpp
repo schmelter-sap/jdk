@@ -400,8 +400,9 @@ class AbstractDumpWriter : public CHeapObj<mtInternal> {
   size_t _size;
   size_t _pos;
 
-  bool _in_dump_segment; // Are we currently in a dump segment?
-  bool _is_huge_sub_record; // Are we writing a sub-record larger than the buffer size?
+  size_t _dump_segment_offset; // The offset of the current patchable dump segment.
+  bool _in_patchable_segment;// If true, we are in a pacthable dump segment.
+  DEBUG_ONLY(bool _in_dump_segment;) // Are we currently in a dump segment?
   DEBUG_ONLY(size_t _sub_record_left;) // The bytes not written for the current sub-record.
   DEBUG_ONLY(bool _sub_record_ended;) // True if we have called the end_sub_record().
 
@@ -418,11 +419,13 @@ class AbstractDumpWriter : public CHeapObj<mtInternal> {
   void write_address(address a);
 
  public:
-  AbstractDumpWriter() :
-    _buffer(nullptr),
-    _size(io_buffer_max_size),
-    _pos(0),
-    _in_dump_segment(false) { }
+   AbstractDumpWriter() :
+     _buffer(nullptr),
+     _size(io_buffer_max_size),
+     _pos(0),
+     _in_patchable_segment(false) {
+     DEBUG_ONLY(_in_dump_segment = false;)
+   }
 
   // Total number of bytes written to the disk
   virtual julong bytes_written() const = 0;
@@ -471,8 +474,8 @@ void AbstractDumpWriter::write_raw(const void* s, size_t len) {
 
   // flush buffer to make room.
   while (len > buffer_size() - position()) {
-    assert(!_in_dump_segment || _is_huge_sub_record,
-           "Cannot overflow in non-huge sub-record.");
+    assert(!_in_patchable_segment,
+           "Cannot overflow in patachable dump segment.");
     size_t to_write = buffer_size() - position();
     memcpy(buffer() + position(), s, to_write);
     s = (void*) ((char*) s + to_write);
@@ -545,46 +548,43 @@ void AbstractDumpWriter::write_classID(Klass* k) {
 }
 
 void AbstractDumpWriter::finish_dump_segment() {
-  if (_in_dump_segment) {
-    assert(_sub_record_left == 0, "Last sub-record not written completely");
-    assert(_sub_record_ended, "sub-record must have ended");
+  assert(!_in_dump_segment || (_sub_record_left == 0), "Last sub-record not written completely");
+  assert(!_in_dump_segment || _sub_record_ended, "sub-record must have ended");
 
-    // Fix up the dump segment length if we haven't written a huge sub-record last
-    // (in which case the segment length was already set to the correct value initially).
-    if (!_is_huge_sub_record) {
-      assert(position() > dump_segment_header_size, "Dump segment should have some content");
-      Bytes::put_Java_u4((address) (buffer() + 5),
-                         (u4) (position() - dump_segment_header_size));
-    } else {
-      // Finish process huge sub record
-      // Set _is_huge_sub_record to false so the parallel dump writer can flush data to file.
-      _is_huge_sub_record = false;
-    }
-
-    _in_dump_segment = false;
-    flush();
+  if (_in_patchable_segment) {
+    assert(position() > dump_segment_header_size, "Dump segment should have some content");
+    Bytes::put_Java_u4((address)(buffer() + _dump_segment_offset + 5),
+      (u4)(position() - dump_segment_header_size - _dump_segment_offset));
+    _in_patchable_segment = false;
   }
+
+  DEBUG_ONLY(_in_dump_segment = false;)
 }
 
 void AbstractDumpWriter::start_sub_record(u1 tag, u4 len) {
-  if (!_in_dump_segment) {
-    if (position() > 0) {
+  if (!_in_patchable_segment) {
+    // Flush if we cannot start a new dump segement in the buffer.
+    if (position() + dump_segment_header_size >= buffer_size()) {
       flush();
     }
 
-    assert(position() == 0 && buffer_size() > dump_segment_header_size, "Must be at the start");
-
-    write_u1(HPROF_HEAP_DUMP_SEGMENT);
+    DEBUG_ONLY(_in_dump_segment = false;)
+      write_u1(HPROF_HEAP_DUMP_SEGMENT);
     write_u4(0); // timestamp
-    // Will be fixed up later if we add more sub-records.  If this is a huge sub-record,
-    // this is already the correct length, since we don't add more sub-records.
+    // This will be patched later, when the new dump segment is not a
+    // multi buffer segment.
     write_u4(len);
-    assert(Bytes::get_Java_u4((address)(buffer() + 5)) == len, "Inconsistent size!");
-    _in_dump_segment = true;
-    _is_huge_sub_record = len > buffer_size() - dump_segment_header_size;
-  } else if (_is_huge_sub_record || (len > buffer_size() - position())) {
-    // This object will not fit in completely or the last sub-record was huge.
-    // Finish the current segment and try again.
+    DEBUG_ONLY(_in_dump_segment = true;)
+      assert(Bytes::get_Java_u4((address)(buffer() + position() - 4)) == len, "Inconsistent size!");
+
+    // Remember the start of the segment if we keep it in this buffer.
+    if (position() + len < buffer_size()) {
+      _dump_segment_offset = (int)position() - dump_segment_header_size;
+      _in_patchable_segment = true;
+    }
+  }
+  else if (position() + len > buffer_size()) {
+    // This sub record fill not fit, so finish the current dump segement a try again.    finish_dump_segment();
     finish_dump_segment();
     start_sub_record(tag, len);
 
@@ -2337,6 +2337,7 @@ bool VM_HeapDumper::skip_operation() const {
 // fixes up the current dump record and writes HPROF_HEAP_DUMP_END record
 void DumperSupport::end_of_dump(AbstractDumpWriter* writer) {
   writer->finish_dump_segment();
+  writer->flush();
 
   writer->write_u1(HPROF_HEAP_DUMP_END);
   writer->write_u4(0);
