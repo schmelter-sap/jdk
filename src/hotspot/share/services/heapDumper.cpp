@@ -569,22 +569,21 @@ void AbstractDumpWriter::start_sub_record(u1 tag, u4 len) {
     }
 
     DEBUG_ONLY(_in_dump_segment = false;)
-      write_u1(HPROF_HEAP_DUMP_SEGMENT);
+    write_u1(HPROF_HEAP_DUMP_SEGMENT);
     write_u4(0); // timestamp
-    // This will be patched later, when the new dump segment is not a
-    // multi buffer segment.
+    // This will be patched later, when additional sub records can
+    // be added without overflowing the buffer.
     write_u4(len);
     DEBUG_ONLY(_in_dump_segment = true;)
-      assert(Bytes::get_Java_u4((address)(buffer() + position() - 4)) == len, "Inconsistent size!");
+    assert(Bytes::get_Java_u4((address)(buffer() + position() - 4)) == len, "Inconsistent size!");
 
-    // Remember the start of the segment if we keep it in this buffer.
+    // Remember the start of the segment if it doesn't span multiple buffers.
     if (position() + len < buffer_size()) {
       _dump_segment_offset = (int)position() - dump_segment_header_size;
       _in_patchable_segment = true;
     }
-  }
-  else if (position() + len > buffer_size()) {
-    // This sub record fill not fit, so finish the current dump segement a try again.    finish_dump_segment();
+  } else if (position() + len > buffer_size()) {
+    // This sub record will not fit, so finish the current dump segement and try again.
     finish_dump_segment();
     start_sub_record(tag, len);
 
