@@ -27,11 +27,13 @@
 #include "classfile/vmClasses.hpp"
 #include "classfile/vmSymbols.hpp"
 #include "compiler/compileBroker.hpp"
+#include "interpreter/bytecodeUtils.hpp"
 #include "logging/log.hpp"
 #include "logging/logStream.hpp"
 #include "memory/resourceArea.hpp"
 #include "memory/universe.hpp"
 #include "oops/oop.inline.hpp"
+#include "runtime/globals_extension.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/init.hpp"
 #include "runtime/java.hpp"
@@ -167,9 +169,50 @@ void Exceptions::_throw_oop(JavaThread* thread, const char* file, int line, oop 
   _throw(thread, file, line, h_exception);
 }
 
+enum AbortForNPEState {
+  TRACK_NPE_UNKNOWN,
+  DONT_TRACK_NPE,
+  TRACK_NPE
+};
+
+volatile AbortForNPEState abortForNPE = TRACK_NPE_UNKNOWN;
+
 void Exceptions::_throw(JavaThread* thread, const char* file, int line, Handle h_exception, const char* message) {
   ResourceMark rm(thread);
   assert(h_exception() != nullptr, "exception should not be null");
+
+  // Create NPE message if we log it or use for AbortVMOnException.
+  bool createMsg = false;
+
+  if (log_is_enabled(Info, exceptions) || (AbortVMOnException != nullptr)) {
+    if ((message == nullptr) && h_exception->klass()->name() == vmSymbols::java_lang_NullPointerException() && ShowCodeDetailsInExceptionMessages) {
+      if (log_is_enabled(Info, exceptions) || (abortForNPE == TRACK_NPE)) {
+        createMsg = true;
+      } else if (abortForNPE == TRACK_NPE_UNKNOWN) {
+        if ((AbortVMOnException != nullptr) && (strstr(h_exception->klass()->external_name(), AbortVMOnException) != nullptr)) {
+          abortForNPE = TRACK_NPE;
+          createMsg = true;
+        } else {
+          abortForNPE = DONT_TRACK_NPE;
+        }
+      }
+
+      if (createMsg) {
+        Method* method;
+        int bci;
+
+        if (java_lang_Throwable::get_top_method_and_bci(h_exception(), &method, &bci)) {
+          if (!method->is_native()) {
+            stringStream ss;
+
+            if (BytecodeUtils::get_NPE_message_at(&ss, method, bci)) {
+              message = ss.as_string();
+            }
+          }
+        }
+      }
+    }
+  }
 
   // tracing (do this up front - so it works during boot strapping)
   // Note, the print_value_string() argument is not called unless logging is enabled!
